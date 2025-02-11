@@ -104,6 +104,7 @@ async fn main() {
 
     let app = if allow_registration == 1 {
         app.route("/register", post(register::register))
+        .route("/upload", get(register::upload_wg))
     } else if allow_registration == 2 {
         app.route("/register", post(register::register))
         .route("/upload", get(register::upload))

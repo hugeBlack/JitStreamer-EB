@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File Upload</title>
+</head>
+<body>
+    <h2>Please select your paring file 请选择您的配对文件</h2>
+    <input type="file" id="fileInput">
+    <button onclick="uploadFile()">Upload 上传</button>
+    <p id="status"></p>
+    <p id="response"></p>
+
+    <script>
+    function downloadConfig(content) {
+        // Create a Blob containing the content
+        const blob = new Blob([content], { type: 'application/octet-stream' });
+        
+        // Create a link element
+        const a = document.createElement('a');
+        
+        // Set the download URL as a Blob URL
+        a.href = URL.createObjectURL(blob);
+        
+        // Set the file name
+        a.download = 'jitstreamer.conf';
+        
+        // Append to the document and trigger download
+        document.body.appendChild(a);
+        a.click();
+        
+        // Clean up
+        document.body.removeChild(a);
+        URL.revokeObjectURL(a.href);
+    }
+
+        function uploadFile() {
+            const fileInput = document.getElementById('fileInput');
+            if (fileInput.files.length === 0) {
+                alert('Please select your paring file.');
+                return;
+            }
+            
+            const file = fileInput.files[0];
+            
+            fetch('./register', {
+                method: 'POST',
+                body: file,
+                headers: {
+                    'Content-Type': file.type
+                }
+            })
+            .then(response => response.text())
+            .then(data => {
+                document.getElementById('status').innerText = 'Wireguard Config: ';
+                document.getElementById('response').innerText = data;
+                downloadConfig(data);
+            })
+            .catch(error => {
+                document.getElementById('status').innerText = 'Error: ';
+                document.getElementById('response').innerText = data;
+            });
+        }
+    </script>
+</body>
+</html>
+

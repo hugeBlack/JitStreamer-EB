@@ -46,6 +46,10 @@ pub fn check_wireguard() {
     }
 }
 
+fn is_valid_udid(s: &String) -> bool {
+    s.chars().all(|c| c.is_ascii() || c.is_ascii_digit() || c == '-')
+}
+
 /// Takes the plist in bytes, and returns either the pairing file in return or an error message
 pub async fn register(client_ip: SecureClientIp, plist_bytes: Bytes) -> Result<Bytes, (StatusCode, &'static str)> {
     let plist = match plist::from_bytes::<Dictionary>(plist_bytes.as_ref()) {
@@ -59,6 +63,10 @@ pub async fn register(client_ip: SecureClientIp, plist_bytes: Bytes) -> Result<B
     .to_owned();
 
     let cloned_udid = udid.clone();
+    if !is_valid_udid(&cloned_udid) {
+        return Err((StatusCode::BAD_REQUEST, "invalid udid"));
+    }
+
     // Reverse lookup the device to see if we already have an IP for it
     let ip = match tokio::task::spawn_blocking(move || {
         let db = match sqlite::open("jitstreamer.db") {
@@ -132,6 +140,10 @@ pub async fn register(client_ip: SecureClientIp, plist_bytes: Bytes) -> Result<B
             .unwrap_or("51869".to_string())
             .parse::<u16>()
             .unwrap_or(51869);
+        let wireguard_port_client = std::env::var("WIREGUARD_PORT_CONFIG")
+        .unwrap_or("51869".to_string())
+        .parse::<u16>()
+        .unwrap_or(wireguard_port);
         let wireguard_server_address =
             std::env::var("WIREGUARD_SERVER_ADDRESS").unwrap_or("fd00::/128".to_string());
         let wireguard_endpoint =
@@ -202,7 +214,8 @@ pub async fn register(client_ip: SecureClientIp, plist_bytes: Bytes) -> Result<B
         let ip = generate_ipv6_from_udid(udid.as_str());
         ip_final = ip;
         // Generate a new peer for the device
-        client_config = match server_peer.generate_peer(
+
+        let client_config_str = match server_peer.generate_peer(
             std::net::IpAddr::V6(ip),
             wireguard_endpoint.parse().unwrap(),
             vec![wireguard_server_allowed_ips.parse().unwrap()],
@@ -210,12 +223,20 @@ pub async fn register(client_ip: SecureClientIp, plist_bytes: Bytes) -> Result<B
             true,
             Some(20),
         ) {
-            Ok(config) => config.to_string().as_bytes().to_vec(),
+            Ok(config) => config.to_string(),
             Err(e) => {
                 info!("Failed to generate peer: {:?}", e);
                 return Err((StatusCode::INTERNAL_SERVER_ERROR, "failed to generate peer"));
             }
         };
+        if wireguard_port_client != wireguard_port {
+            client_config = client_config_str.replace(&format!("{}:{}", wireguard_endpoint, wireguard_port), &format!("{}:{}", wireguard_endpoint, wireguard_port_client)).as_bytes().to_vec();
+        } else {
+            client_config = client_config_str.as_bytes().to_vec();
+        }
+
+
+
     } else if register_mode == 2 {
         // register directly using request IP
         ip_final = match client_ip.0 {
@@ -277,6 +298,12 @@ const UPLOAD_HTML: &str = include_str!("../src/upload.html");
 
 pub async fn upload() -> Result<Html<&'static str>, (StatusCode, &'static str)> {
     Ok(Html(UPLOAD_HTML))
+}
+
+const UPLOAD_HTML_WG: &str = include_str!("../src/upload_wg.html");
+
+pub async fn upload_wg() -> Result<Html<&'static str>, (StatusCode, &'static str)> {
+    Ok(Html(UPLOAD_HTML_WG))
 }
 
 fn generate_ipv6_from_udid(udid: &str) -> std::net::Ipv6Addr {
