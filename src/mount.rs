@@ -95,7 +95,7 @@ pub async fn check_mount(
     }
     std::mem::drop(lock);
 
-    let pairing_file = match common::get_pairing_file(&udid).await {
+    let pairing_file = match common::get_pairing_file(&udid, &state.pairing_file_storage).await {
         Ok(p) => p,
         Err(e) => {
             return Json(CheckMountResponse {

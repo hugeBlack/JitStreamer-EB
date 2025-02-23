@@ -182,7 +182,7 @@ Optional: "Is everything ok so far?" check. Type:
 
 You should see:
 
-```devices       downloads     launch_queue  mount_queue```
+```devices       downloads     launch_queue```
 
 This means your tables inside the database were created as instructed above. Good, good.
 
@@ -225,6 +225,8 @@ If you got the above response, then you are done with database creation.
 We got everything created and placed where it needs to be. We're ready to do some JITing.
 
 ### Build and Run the Docker Image
+
+**NOTE: Step 1 below (building the image) is NO LONGER NECESSARY! If you wish to build the image, then by all means, feel free. However, if you're docker-compose.yml file has ```image: jkcoxson/jitstreamer-eb:latest``` then you can skip to Step 2 below. Your Docker image will be automatically pulled and run once it's downloaded!**
 
 1. Build the docker image! This takes a bit to download then compile. Ensure it finishes with no errors. 
 
@@ -301,6 +303,37 @@ I bring up ufw because I was unable to connect my iDevice to my Debian host (and
 ```sudo ufw allow to 192.168.1.2```
 
 Then it worked perfectly. It may also work if you allow the port 9172, but I haven't tried. The above worked. Good enough for me.
+
+**Update on the above point: ```sudo ufw allow 9172``` DOES WORk**
+
+### Network_bridge mode with Docker compose?
+
+**YES** It does work. Or, it should, anyway.
+Here's my working docker-compose.yml to use network bridge mode. At some point this will probably get added to the repo separately.
+
+```
+services:
+    jitstreamer-eb:
+        container_name: jitstreamer-eb
+        #network_mode: host
+        volumes:
+            - ./lockdown:/var/lib/lockdown
+           # - ./wireguard:/etc/wireguard
+            - ./jitstreamer.db:/app/jitstreamer.db
+        environment:
+            - RUST_LOG=info
+            - RUNNER_COUNT=1
+            - ALLOW_REGISTRATION=2
+        ports:
+            - 9172:9172
+        cap_add:
+            - NET_ADMIN
+        devices:
+            - /dev/net/tun:/dev/net/tun
+        image: jkcoxson/jitstreamer-eb:latest
+        restart: unless-stopped
+```
+Note that this docker-compose file will: run in network bridge mode, not create a wireguard directory or .conf file, and exposes on port 9172.
 
 ### What does this work with?
 

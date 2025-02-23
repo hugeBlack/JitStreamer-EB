@@ -35,6 +35,7 @@ mod runner;
 struct JitStreamerState {
     pub new_heartbeat_sender: NewHeartbeatSender,
     pub mount_cache: mount::MountCache,
+    pub pairing_file_storage: String,
 }
 
 #[tokio::main]
@@ -55,6 +56,7 @@ async fn main() {
         .unwrap_or("9172".to_string())
         .parse::<u16>()
         .unwrap();
+    let pairing_file_storage = std::env::var("PLIST_STORAGE").unwrap_or("/var/lib/lockdown".to_string());
 
     env_logger::init();
     info!("Logger initialized");
@@ -76,6 +78,7 @@ async fn main() {
     let state = JitStreamerState {
         new_heartbeat_sender: heartbeat::heartbeat(),
         mount_cache: mount::MountCache::default(),
+        pairing_file_storage,
     };
 
     // Run the Python shims
@@ -191,7 +194,7 @@ async fn get_apps(
 
     // Get the pairing file
     debug!("Getting pairing file for {udid}");
-    let pairing_file = match get_pairing_file(&udid).await {
+    let pairing_file = match get_pairing_file(&udid, &state.pairing_file_storage).await {
         Ok(pairing_file) => pairing_file,
         Err(e) => {
             info!("Failed to get pairing file: {:?}", e);
@@ -266,7 +269,7 @@ async fn get_apps(
             });
         }
     };
-    let apps: HashMap<String, String> = apps
+    let mut apps: HashMap<String, String> = apps
         .into_iter()
         .filter(|(_, app)| {
             // Filter out apps that don't have get-task-allow
@@ -305,6 +308,8 @@ async fn get_apps(
             error: Some("No apps with get-task-allow found".to_string()),
         });
     }
+
+    apps.insert("Other...".to_string(), "UPDATE YOUR SHORTCUT".to_string());
 
     state
         .new_heartbeat_sender

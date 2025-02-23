@@ -38,9 +38,12 @@ pub async fn get_udid_from_ip(ip: String) -> Result<String, String> {
 }
 
 /// Gets the pairing file
-pub async fn get_pairing_file(udid: &str) -> Result<PairingFile, idevice::IdeviceError> {
+pub async fn get_pairing_file(
+    udid: &str,
+    pairing_file_storage: &str,
+) -> Result<PairingFile, idevice::IdeviceError> {
     // All pairing files are stored at /var/lib/lockdown/<udid>.plist
-    let path = format!("/var/lib/lockdown/{}.plist", udid);
+    let path = format!("{pairing_file_storage}/{udid}.plist");
     let pairing_file = tokio::fs::read(path).await?;
 
     PairingFile::from_bytes(&pairing_file)

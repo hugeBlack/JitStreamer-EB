@@ -2,10 +2,21 @@ import plistlib
 import struct
 import asyncio
 import requests
+import os
 
-NETMUXD_SOCKET = "/var/run/usbmuxd"
 SERVICE_NAME = "apple-mobdev2"
 SERVICE_PROTOCOL = "tcp"
+USBMUXD_ADDRESS = os.getenv("USBMUXD_SOCKET_ADDRESS", "/var/run/usbmuxd")
+
+
+async def connect():
+    if USBMUXD_ADDRESS.startswith("/"):  # Likely a Unix socket
+        reader, writer = await asyncio.open_unix_connection(USBMUXD_ADDRESS)
+    else:  # Assume it's a TCP address in the form "host:port"
+        host, port = USBMUXD_ADDRESS.rsplit(":", 1)
+        reader, writer = await asyncio.open_connection(host, int(port))
+
+    return reader, writer
 
 
 class RawPacket:
@@ -45,7 +56,7 @@ class RawPacket:
 
 async def remove_device(udid):
     try:
-        reader, writer = await asyncio.open_unix_connection(NETMUXD_SOCKET)
+        reader, writer = await connect()
     except Exception as e:
         print(f"[ERROR] Failed to connect to netmuxd: {str(e)}")
         return
@@ -72,7 +83,7 @@ async def remove_device(udid):
 
 async def add_device(ip, udid):
     try:
-        reader, writer = await asyncio.open_unix_connection(NETMUXD_SOCKET)
+        reader, writer = await connect()
     except Exception as e:
         print("Could not connect to netmuxd socket, is it running? Error: %s", e)
         return False

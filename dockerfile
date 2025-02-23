@@ -14,16 +14,10 @@ RUN apt-get update && apt-get install -y \
 # Set the working directory
 WORKDIR /app
 
-# Copy the project files into the container
-COPY . .
-
-# Build the JitStreamer EB project in release mode
-RUN cargo build --release
-
 # Clone and build netmuxd
 RUN git clone https://github.com/jkcoxson/netmuxd.git && \
     cd netmuxd && \
-    git reset --hard bb1477bf8c610343d203098f85869e88ee9bb149 && \
+    git reset --hard 6b4941dbed8fac38c67db031be0309717ff6b4e3 && \
     cargo build --release && \
     cd ..
 
@@ -33,6 +27,11 @@ RUN git clone https://github.com/jkcoxson/tunneld-rs.git && \
     cargo build --release && \
     cd ..
 
+# Copy the project files into the container
+COPY . .
+
+# Build the JitStreamer EB project in release mode
+RUN cargo build --release
 
 # Prepare the final runtime image
 FROM debian:bookworm-slim
