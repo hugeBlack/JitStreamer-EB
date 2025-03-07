@@ -1,21 +1,25 @@
 # Usage on MacOS
 
-Rough instructions by jkcoxson, could be explained better.
-
 ## Building
-
-Clone the following repos and build them with cargo:
+Clone and build the following repositories:
 
 [netmuxd](https://github.com/jkcoxson/netmuxd)
 [tunneld-rs](https://github.com/jkcoxson/tunneld-rs)
 [JitStreamer-EB](https://github.com/jkcoxson/JitStreamer-EB)
 
 ```bash
-cargo build --release
+# Clone repositories
+git clone https://github.com/jkcoxson/netmuxd.git
+git clone https://github.com/jkcoxson/tunneld-rs.git
+git clone https://github.com/jkcoxson/JitStreamer-EB.git
+
+# Build each project
+cd netmuxd && cargo build --release
+cd ../tunneld-rs && cargo build --release
+cd ../JitStreamer-EB && cargo build --release
 ```
 
 ## Usage
-
 If you have a weird Python and brew dumpster fire like I do, create a venv
 and install the dependencies:
 
@@ -27,18 +31,27 @@ pip3 install requests aiosqlite pymobiledevice3
 
 Download the [runners](../src/runners) folder to your folder
 
-Run the following commands in separate terminals, they'll do the magic.
+## Running Services
+Run the following commands in 3 separate terminals:
 
+1. Tunneld:
 ```bash
 sudo RUST_LOG=info USBMUXD_SOCKET_ADDRESS=127.0.0.1:27015 ./target/release/tunneld-rs
+```
+
+2. Netmuxd:
+```bash
 sudo RUST_LOG=info ./target/release/netmuxd --disable-unix --host 127.0.0.1 --plist-storage ~/Desktop/plist_storage
+```
+
+3. JitStreamer:
+```bash
 RUST_LOG=info PLIST_STORAGE=~/Desktop/plist_storage ALLOW_REGISTRATION=2 USBMUXD_SOCKET_ADDRESS=127.0.0.1:27015 ./target/release/jitstreamer-eb
 ```
 
-Get your shortcut from the [site](https://jkcoxson.com/jitstreamer)
-and change the IP to your Mac's IP
-
-## Yay
-
-Go to ``your.macs.ip:9172/upload`` and submit your pairing file.
-Run the shortcut. Profit.
+## Final Steps
+1. Get your shortcut from [jkcoxson.com/jitstreamer](https://jkcoxson.com/jitstreamer)
+2. Change the IP to your Mac's IP address
+3. Go to `your.macs.ip:9172/upload`
+4. Submit your pairing file
+5. Profit

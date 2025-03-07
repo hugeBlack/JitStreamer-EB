@@ -50,6 +50,7 @@ async def launch_app(udid, ip, bundle_id):
                 start_suspended=True,
                 environment={},
             )
+            process_control.disable_memory_limit_for_pid(app)
 
             try:
                 if len(device.service.address) == 0:
