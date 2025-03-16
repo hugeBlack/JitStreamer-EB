@@ -5,7 +5,7 @@ const VERSION: [u8; 3] = [0, 2, 0];
 
 use std::{
     collections::HashMap,
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
     str::FromStr,
 };
 
@@ -18,18 +18,21 @@ use axum::{
 use axum_client_ip::SecureClientIp;
 use common::get_pairing_file;
 use heartbeat::NewHeartbeatSender;
-use idevice::{installation_proxy::InstallationProxyClient, provider::TcpProvider, IdeviceService};
+use idevice::{
+    debug_proxy::DebugProxyClient, installation_proxy::InstallationProxyClient,
+    provider::TcpProvider, tunneld, IdeviceService,
+};
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 
 mod common;
 mod db;
-mod debug_server;
 mod heartbeat;
 mod mount;
+mod netmuxd;
+mod raw_packet;
 mod register;
-mod runner;
 
 #[derive(Clone)]
 struct JitStreamerState {
@@ -42,12 +45,8 @@ struct JitStreamerState {
 async fn main() {
     println!("Starting JitStreamer-EB, enabling logger");
     dotenvy::dotenv().ok();
-    //
+
     // Read the environment variable constants
-    let runner_count = std::env::var("RUNNER_COUNT")
-        .unwrap_or("10".to_string())
-        .parse::<u32>()
-        .unwrap();
     let allow_registration = std::env::var("ALLOW_REGISTRATION")
         .unwrap_or("1".to_string())
         .parse::<u8>()
@@ -56,7 +55,8 @@ async fn main() {
         .unwrap_or("9172".to_string())
         .parse::<u16>()
         .unwrap();
-    let pairing_file_storage = std::env::var("PLIST_STORAGE").unwrap_or("/var/lib/lockdown".to_string());
+    let pairing_file_storage =
+        std::env::var("PLIST_STORAGE").unwrap_or("/var/lib/lockdown".to_string());
 
     env_logger::init();
     info!("Logger initialized");
@@ -71,18 +71,12 @@ async fn main() {
         db.execute(include_str!("sql/up.sql")).unwrap();
     }
 
-    // Empty the queues
-    debug_server::empty().await;
-
     // Create a heartbeat manager
     let state = JitStreamerState {
         new_heartbeat_sender: heartbeat::heartbeat(),
         mount_cache: mount::MountCache::default(),
         pairing_file_storage,
     };
-
-    // Run the Python shims
-    runner::run("src/runners/launch.py", runner_count);
 
     let cors = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
@@ -102,7 +96,8 @@ async fn main() {
         )
         .route("/get_apps", get(get_apps))
         .route("/launch_app/{bundle_id}", get(launch_app))
-        .route("/status", get(status))
+        .route("/attach/{pid}", post(attach_app))
+        .route("/status", get(status)) // will be removed soon
         .with_state(state);
 
     let app = if allow_registration == 1 {
@@ -334,11 +329,9 @@ struct LaunchAppReturn {
     mounting: bool, // NOTICE: this field does literally nothing and will be removed in future
                     // versions
 }
+
 ///  - Get the IP from the request and UDID from the database
-/// - Make sure netmuxd still has the device
-///  - Check the mounted images for the developer disk image
-///    - If not mounted, add the device to the queue for mounting
-///    - Return a message letting the user know the device is mounting
+///  - Mount the device
 ///  - Connect to tunneld and get the interface and port for the developer service
 ///  - Send the commands to launch the app and detach
 ///  - Set last_used to now in the database
@@ -360,56 +353,403 @@ async fn launch_app(ip: SecureClientIp, Path(bundle_id): Path<String>) -> Json<L
         }
     };
 
-    // Check if there are any launches queued
-    debug!("Checking launch queue for {udid}");
-    match debug_server::get_queue_info(&udid).await {
-        debug_server::LaunchQueueInfo::Position(p) => {
+    info!("Adding {udid} to netmuxd");
+    if !netmuxd::add_device(ip, &udid).await {
+        return Json(LaunchAppReturn {
+            ok: false,
+            error: Some("Unable to add device to netmuxd".to_string()),
+            launching: false,
+            position: None,
+            mounting: false,
+        });
+    }
+
+    let mut tun_dev = None;
+    for _ in 0..100 {
+        let mut devs = match idevice::tunneld::get_tunneld_devices(SocketAddr::V4(
+            SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), tunneld::DEFAULT_PORT),
+        ))
+        .await
+        {
+            Ok(d) => d,
+            Err(e) => {
+                log::error!("Failed to get devs from tunneld! {e:?}");
+                return Json(LaunchAppReturn {
+                    ok: false,
+                    error: Some("Failed to get devices from tunneld".to_string()),
+                    launching: false,
+                    position: None,
+                    mounting: false,
+                });
+            }
+        };
+
+        if let Some(dev) = devs.remove(&udid) {
+            tun_dev = Some(dev);
+            break;
+        }
+
+        // about 10 seconds in total
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    let tun_dev = match tun_dev {
+        Some(t) => t,
+        None => {
+            log::error!("tunneld didn't have the device in time");
             return Json(LaunchAppReturn {
-                ok: true,
-                launching: true,
-                position: Some(p),
-                error: None,
+                ok: false,
+                error: Some("tunneld didn't contain your device".to_string()),
+                launching: false,
+                position: None,
                 mounting: false,
             });
         }
-        debug_server::LaunchQueueInfo::NotInQueue => {}
-        debug_server::LaunchQueueInfo::Error(e) => {
+    };
+
+    let tunnel_address = match IpAddr::from_str(&tun_dev.tunnel_address) {
+        Ok(t) => t,
+        Err(e) => {
+            log::error!("Failed to parse tunneld device IP address: {e:?}");
             return Json(LaunchAppReturn {
                 ok: false,
+                error: Some("tunneld contained bad IP string".to_string()),
                 launching: false,
                 position: None,
-                error: Some(e),
                 mounting: false,
             });
         }
-        debug_server::LaunchQueueInfo::ServerError => {
+    };
+
+    let xpc_conn =
+        match tokio::net::TcpStream::connect(SocketAddr::new(tunnel_address, tun_dev.tunnel_port))
+            .await
+        {
+            Ok(x) => x,
+            Err(e) => {
+                log::warn!("Failed to connect to RemoteXCP port: {e:?}");
+                return Json(LaunchAppReturn {
+                    ok: false,
+                    error: Some("Failed to connect to RemoteXCP port".to_string()),
+                    launching: false,
+                    position: None,
+                    mounting: false,
+                });
+            }
+        };
+
+    let xpc_client = match idevice::xpc::XPCDevice::new(Box::new(xpc_conn)).await {
+        Ok(x) => x,
+        Err(e) => {
+            log::warn!("Failed to connect to RemoteXCP: {e:?}");
             return Json(LaunchAppReturn {
                 ok: false,
+                error: Some("Failed to connect to RemoteXCP".to_string()),
                 launching: false,
                 position: None,
-                error: Some("Failed to get launch status".to_string()),
                 mounting: false,
             });
+        }
+    };
+
+    let service = match xpc_client.services.get(idevice::dvt::SERVICE_NAME) {
+        Some(s) => s,
+        None => {
+            return Json(LaunchAppReturn {
+                ok: false,
+                error: Some(
+                    "Device did not contain DVT service. Is the image mounted?".to_string(),
+                ),
+                launching: false,
+                position: None,
+                mounting: false,
+            });
+        }
+    };
+
+    let stream =
+        match tokio::net::TcpStream::connect(SocketAddr::new(tunnel_address, service.port)).await {
+            Ok(x) => x,
+            Err(e) => {
+                log::warn!("Failed to connect to DVT port: {e:?}");
+                return Json(LaunchAppReturn {
+                    ok: false,
+                    error: Some("Failed to connect to DVT port".to_string()),
+                    launching: false,
+                    position: None,
+                    mounting: false,
+                });
+            }
+        };
+
+    let mut rs_client = match idevice::dvt::remote_server::RemoteServerClient::new(Box::new(stream))
+    {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("Failed to create remote server client: {e:?}");
+            return Json(LaunchAppReturn {
+                ok: false,
+                error: Some(format!("Failed to create remote server client: {e:?}")),
+                launching: false,
+                position: None,
+                mounting: false,
+            });
+        }
+    };
+    if let Err(e) = rs_client.read_message(0).await {
+        log::warn!("Failed to read first message from remote server client: {e:?}");
+        return Json(LaunchAppReturn {
+            ok: false,
+            error: Some(format!(
+                "Failed to read first message from remote server client: {e:?}"
+            )),
+            launching: false,
+            position: None,
+            mounting: false,
+        });
+    }
+
+    let mut pc_client =
+        match idevice::dvt::process_control::ProcessControlClient::new(&mut rs_client).await {
+            Ok(p) => p,
+            Err(e) => {
+                log::warn!("Failed to create process control client: {e:?}");
+                return Json(LaunchAppReturn {
+                    ok: false,
+                    error: Some(format!("Failed to create process control client: {e:?}")),
+                    launching: false,
+                    position: None,
+                    mounting: false,
+                });
+            }
+        };
+
+    let pid = match pc_client
+        .launch_app(bundle_id, None, None, true, false)
+        .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("Failed to launch app: {e:?}");
+            return Json(LaunchAppReturn {
+                ok: false,
+                error: Some(format!("Failed to launch app: {e:?}")),
+                launching: false,
+                position: None,
+                mounting: false,
+            });
+        }
+    };
+    debug!("Launched app with PID {pid}");
+    if let Err(e) = pc_client.disable_memory_limit(pid).await {
+        log::warn!("Failed to disable memory limit: {e:?}")
+    }
+
+    let service = match xpc_client.services.get(idevice::debug_proxy::SERVICE_NAME) {
+        Some(s) => s,
+        None => {
+            return Json(LaunchAppReturn {
+                ok: false,
+                error: Some(
+                    "Device did not contain debug server service. Is the image mounted?"
+                        .to_string(),
+                ),
+                launching: false,
+                position: None,
+                mounting: false,
+            });
+        }
+    };
+
+    let stream =
+        match tokio::net::TcpStream::connect(SocketAddr::new(tunnel_address, service.port)).await {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("Failed to connect to debug server port: {e:?}");
+                return Json(LaunchAppReturn {
+                    ok: false,
+                    error: Some("Failed to connect to debug server port".to_string()),
+                    launching: false,
+                    position: None,
+                    mounting: false,
+                });
+            }
+        };
+
+    let mut dp = DebugProxyClient::new(Box::new(stream));
+    let commands = [format!("vAttach;{pid:02X}"), "D".to_string()];
+    for command in commands {
+        match dp.send_command(command.into()).await {
+            Ok(res) => {
+                debug!("command res: {res:?}");
+            }
+            Err(e) => {
+                log::warn!("Failed to send command to debug server: {e:?}");
+                return Json(LaunchAppReturn {
+                    ok: false,
+                    error: Some(format!("Failed to send command to debug server: {e:?}")),
+                    launching: false,
+                    position: None,
+                    mounting: false,
+                });
+            }
         }
     }
 
-    // Add the launch to the queue
-    match debug_server::add_to_queue(&udid, ip.to_string(), &bundle_id).await {
-        Some(position) => Json(LaunchAppReturn {
-            ok: true,
-            launching: true,
-            position: Some(position as usize),
-            error: None,
-            mounting: false,
-        }),
-        None => Json(LaunchAppReturn {
-            ok: false,
-            launching: false,
-            position: None,
-            error: Some("Failed to add to queue".to_string()),
-            mounting: false,
-        }),
+    netmuxd::remove_device(&udid).await;
+
+    Json(LaunchAppReturn {
+        ok: true,
+        error: None,
+        launching: true,   // true for compatibility reasons, will be removed
+        position: Some(0), // compat field
+        mounting: false,
+    })
+}
+
+// compat with OG JitStreamer
+#[derive(Debug, Serialize)]
+struct AttachReturn {
+    success: bool,
+    message: String,
+}
+
+impl AttachReturn {
+    fn fail(message: String) -> Self {
+        Self {
+            success: false,
+            message,
+        }
     }
+}
+
+async fn attach_app(ip: SecureClientIp, Path(pid): Path<u16>) -> Json<AttachReturn> {
+    let ip = ip.0;
+
+    info!("Got request to attach {pid} from {:?}", ip);
+
+    let udid = match common::get_udid_from_ip(ip.to_string()).await {
+        Ok(u) => u,
+        Err(e) => return Json(AttachReturn::fail(e)),
+    };
+
+    info!("Adding {udid} to netmuxd");
+    if !netmuxd::add_device(ip, &udid).await {
+        return Json(AttachReturn::fail(
+            "Unable to add device to netmuxd".to_string(),
+        ));
+    }
+
+    let mut tun_dev = None;
+    for _ in 0..100 {
+        let mut devs = match idevice::tunneld::get_tunneld_devices(SocketAddr::V4(
+            SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), tunneld::DEFAULT_PORT),
+        ))
+        .await
+        {
+            Ok(d) => d,
+            Err(e) => {
+                log::error!("Failed to get devs from tunneld! {e:?}");
+                return Json(AttachReturn::fail(
+                    "Failed to get devices from tunneld".to_string(),
+                ));
+            }
+        };
+
+        if let Some(dev) = devs.remove(&udid) {
+            tun_dev = Some(dev);
+            break;
+        }
+
+        // about 10 seconds in total
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    let tun_dev = match tun_dev {
+        Some(t) => t,
+        None => {
+            log::error!("tunneld didn't have the device in time");
+            return Json(AttachReturn::fail(
+                "tunneld didn't contain your device".to_string(),
+            ));
+        }
+    };
+
+    let tunnel_address = match IpAddr::from_str(&tun_dev.tunnel_address) {
+        Ok(t) => t,
+        Err(e) => {
+            log::error!("Failed to parse tunneld device IP address: {e:?}");
+            return Json(AttachReturn::fail(
+                "tunneld contained bad IP string".to_string(),
+            ));
+        }
+    };
+
+    let xpc_conn =
+        match tokio::net::TcpStream::connect(SocketAddr::new(tunnel_address, tun_dev.tunnel_port))
+            .await
+        {
+            Ok(x) => x,
+            Err(e) => {
+                log::warn!("Failed to connect to RemoteXCP port: {e:?}");
+                return Json(AttachReturn::fail(
+                    "Failed to connect to RemoteXCP port".to_string(),
+                ));
+            }
+        };
+
+    let xpc_client = match idevice::xpc::XPCDevice::new(Box::new(xpc_conn)).await {
+        Ok(x) => x,
+        Err(e) => {
+            log::warn!("Failed to connect to RemoteXCP: {e:?}");
+            return Json(AttachReturn::fail(
+                "Failed to connect to RemoteXCP".to_string(),
+            ));
+        }
+    };
+
+    let service = match xpc_client.services.get(idevice::debug_proxy::SERVICE_NAME) {
+        Some(s) => s,
+        None => {
+            return Json(AttachReturn::fail(
+                "Device did not contain debug server service. Is the image mounted?".to_string(),
+            ));
+        }
+    };
+
+    let stream =
+        match tokio::net::TcpStream::connect(SocketAddr::new(tunnel_address, service.port)).await {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("Failed to connect to debug server port: {e:?}");
+                return Json(AttachReturn::fail(
+                    "Failed to connect to debug server port".to_string(),
+                ));
+            }
+        };
+
+    let mut dp = DebugProxyClient::new(Box::new(stream));
+    let commands = [format!("vAttach;{pid:02X}"), "D".to_string()];
+    for command in commands {
+        match dp.send_command(command.into()).await {
+            Ok(res) => {
+                debug!("command res: {res:?}");
+            }
+            Err(e) => {
+                log::warn!("Failed to send command to debug server: {e:?}");
+                return Json(AttachReturn::fail(format!(
+                    "Failed to send command to debug server: {e:?}"
+                )));
+            }
+        }
+    }
+
+    netmuxd::remove_device(&udid).await;
+
+    Json(AttachReturn {
+        success: true,
+        message: "".to_string(),
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -421,81 +761,14 @@ struct StatusReturn {
     in_progress: bool, // NOTICE: this field is deprecated and will be removed in future versions
 }
 
-/// Gets the current status of the device
-/// Returns immediately if done or error
-/// Checks every second, up to 15 seconds for a new response.
-async fn status(ip: SecureClientIp) -> Json<StatusReturn> {
-    let start_time = std::time::Instant::now();
-    let ip = ip.0;
-
-    let udid = match common::get_udid_from_ip(ip.to_string()).await {
-        Ok(u) => u,
-        Err(e) => {
-            return Json(StatusReturn {
-                ok: false,
-                done: true,
-                error: Some(e),
-                position: 0,
-                in_progress: false,
-            })
-        }
-    };
-
-    loop {
-        // Check mounts
-        // Check launches
-        // Check if it's been too long
-        let mut to_return = None;
-        match debug_server::get_queue_info(&udid).await {
-            debug_server::LaunchQueueInfo::Position(p) => {
-                to_return = Some(Json(StatusReturn {
-                    ok: true,
-                    done: false,
-                    position: p,
-                    error: None,
-                    in_progress: false,
-                }));
-            }
-            debug_server::LaunchQueueInfo::NotInQueue => {}
-            debug_server::LaunchQueueInfo::Error(e) => {
-                to_return = Some(Json(StatusReturn {
-                    ok: false,
-                    done: true,
-                    position: 0,
-                    error: Some(e),
-                    in_progress: false,
-                }));
-            }
-            debug_server::LaunchQueueInfo::ServerError => {
-                to_return = Some(Json(StatusReturn {
-                    ok: false,
-                    done: true,
-                    position: 0,
-                    error: Some("server error".to_string()),
-                    in_progress: false,
-                }));
-            }
-        }
-
-        match to_return {
-            Some(to_return) => {
-                if start_time.elapsed() > std::time::Duration::from_secs(15) || to_return.done {
-                    info!("Returning status for {udid}: {to_return:?}");
-                    return to_return;
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            }
-            None => {
-                if to_return.is_none() {
-                    return Json(StatusReturn {
-                        ok: true,
-                        done: true,
-                        position: 0,
-                        error: None,
-                        in_progress: false,
-                    });
-                }
-            }
-        }
-    }
+/// Stub function to remain compatible with dependant apps
+/// Will be removed in future updates
+async fn status() -> Json<StatusReturn> {
+    Json(StatusReturn {
+        ok: true,
+        done: true,
+        position: 0,
+        error: None,
+        in_progress: false,
+    })
 }

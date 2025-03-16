@@ -38,8 +38,6 @@ FROM debian:bookworm-slim
 
 # Install required runtime dependencies
 RUN apt-get update && apt-get install -y \
-    python3 \
-    python3-pip \
     wireguard-tools \
     iproute2 \
     librust-openssl-dev \
@@ -50,15 +48,6 @@ RUN apt-get update && apt-get install -y \
 COPY --from=builder /app/target/release/jitstreamer-eb /usr/local/bin/jitstreamer-eb
 COPY --from=builder /app/netmuxd/target/release/netmuxd /usr/local/bin/netmuxd
 COPY --from=builder /app/tunneld-rs/target/release/tunneld-rs /usr/local/bin/tunneld-rs
-COPY --from=builder /app/requirements.txt /app/requirements.txt
-COPY --from=builder /app/src/runners /app/src/runners
-
-# Ensure src/runners/*.python files are included
-COPY src/runners /app/src/runners
-
-# Install Python dependencies for tunneld
-# Break the system packages, I drink error message tears for breakfast
-RUN pip3 install -r /app/requirements.txt --break-system-packages
 
 # Set the default working directory
 WORKDIR /app

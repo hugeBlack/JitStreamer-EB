@@ -23,7 +23,7 @@ use tokio::sync::{watch, Mutex};
 use crate::{
     common,
     heartbeat::{self, NewHeartbeatSender},
-    JitStreamerState,
+    netmuxd, JitStreamerState,
 };
 
 const BUILD_MANIFEST: &[u8] = include_bytes!("../DDI/BuildManifest.plist");
@@ -62,6 +62,17 @@ pub async fn check_mount(
             });
         }
     };
+
+    // Even though we don't need it yet, add it now so tunneld can start the tunnel in the
+    // background. If it fails in between, it will still be added again.
+    info!("Adding {udid} to netmuxd");
+    if !netmuxd::add_device(ip.0, &udid).await {
+        return Json(CheckMountResponse {
+            ok: false,
+            error: Some("Failed to add device to netmuxd".to_string()),
+            mounting: false,
+        });
+    }
 
     let mut lock = state.mount_cache.lock().await;
     if let Some(i) = lock.get(&udid) {
