@@ -830,9 +830,9 @@ dependencies = [
 
 [[package]]
 name = "idevice"
-version = "0.1.23"
+version = "0.1.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff2a61d8321351dbc9c41ce8d3e350b92bd4bb8d9fc0103109193ffaa67e9957"
+checksum = "e19dc74b33756798d2c410d643fa45069957417cdcbd5e48d413c1fc0d8247e0"
 dependencies = [
  "async-recursion",
  "base64",

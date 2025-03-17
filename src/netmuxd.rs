@@ -49,7 +49,13 @@ pub async fn add_device(ip: IpAddr, udid: &str) -> bool {
         buffer.append(&mut packet);
     }
 
-    let parsed: raw_packet::RawPacket = buffer.try_into().unwrap();
+    let parsed: raw_packet::RawPacket = match buffer.try_into() {
+        Ok(p) => p,
+        Err(_) => {
+            log::error!("Failed to parse response as usbmuxd packet!!");
+            return false;
+        }
+    };
     match parsed.plist.get("Result") {
         Some(plist::Value::Integer(r)) => r.as_unsigned().unwrap() == 1,
         _ => false,
